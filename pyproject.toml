@@ -1,0 +1,43 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+asyncio_mode = "auto"
+
+[project]
+name = "chiti"
+version = "0.1.0"
+description = "Personal AI Assistant"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "structlog>=23.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.11.0",
+    "ruff>=0.1.8",
+    "mypy>=1.7.0",
+]
+oauth = [
+    "keyring>=24.3.0",
+]
+database = [
+    "asyncpg>=0.29.0",
+    "aiomysql>=0.2.0",
+    "aiosqlite>=0.19.0",
+]
+skills = [
+    "langgraph>=0.0.20",
+]
+all = [
+    "chiti[dev,oauth,database,skills]",
+]

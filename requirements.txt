@@ -1,0 +1,24 @@
+# Core dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+structlog>=23.2.0
+
+# OAuth (for Gmail, Outlook, etc.)
+keyring>=24.3.0
+
+# Database drivers
+asyncpg>=0.29.0
+aiomysql>=0.2.0
+aiosqlite>=0.19.0
+
+# Agent skills
+langgraph>=0.0.20
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.11.0
+ruff>=0.1.8
+mypy>=1.7.0
