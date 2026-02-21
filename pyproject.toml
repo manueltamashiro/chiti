@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.5.0",
     "structlog>=23.2.0",
+    "aiofiles>=23.2.1",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,10 @@ database = [
 skills = [
     "langgraph>=0.0.20",
 ]
+filesystem = [
+    "aiofiles>=23.2.1",
+    "watchdog>=3.0.0",
+]
 all = [
-    "chiti[dev,oauth,database,skills]",
+    "chiti[dev,oauth,database,skills,filesystem]",
 ]
