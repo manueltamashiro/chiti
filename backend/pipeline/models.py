@@ -124,6 +124,57 @@ class ScrubResult:
     has_leaked_credentials: bool = False
 
 
+# Content Tagger Models
+
+
+class TrustLevel(Enum):
+    """Trust level for content from tool results"""
+    TRUSTED = "trusted"                          # Local, internal, verified source
+    SEMI_TRUSTED = "semi_trusted"                # Known but external source (DB, process)
+    UNTRUSTED_EXTERNAL = "untrusted_external"    # External/unknown source (web, APIs)
+    SANITIZED = "sanitized"                      # Processed but originally contained secrets
+
+
+class ContentSource(Enum):
+    """Origin type of content"""
+    LOCAL_FILESYSTEM = "local_filesystem"   # Local file read
+    USER_INPUT = "user_input"               # Direct user input
+    EXTERNAL_WEB = "external_web"           # HTTP(S) response from web
+    EXTERNAL_API = "external_api"           # External API response
+    DATABASE = "database"                   # Database query result
+    PROCESS_OUTPUT = "process_output"       # Shell/process stdout/stderr
+    INTERNAL = "internal"                   # Generated internally (no external source)
+    UNKNOWN = "unknown"                     # Source could not be determined
+
+
+@dataclass
+class OriginEntry:
+    """Single step in an origin chain tracking how content was produced"""
+    source_name: str                         # Tool/source name, e.g., "read_file", "http_get"
+    content_source: ContentSource
+    path: Optional[str] = None               # File path, URL, DB name, etc.
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
+class ContentTag:
+    """A security tag applied to content"""
+    name: str        # E.g., "EXTERNAL_CONTENT", "SECRETS_SCRUBBED", "INJECTION_DETECTED"
+    reason: str      # Human-readable reason for tagging
+    severity: int    # 0=info, 1=low, 2=medium, 3=high
+
+
+@dataclass
+class TaggerResult:
+    """Result from content tagger"""
+    trust_level: TrustLevel
+    tags: List[ContentTag]
+    origin_chain: List[OriginEntry]
+    wrapped_content: str      # Content with trust markers embedded for LLM consumption
+    summary: str              # Human-readable trust summary
+    requires_disclosure: bool  # Whether to surface distrust info to user
+
+
 # Action Classifier Models
 
 
