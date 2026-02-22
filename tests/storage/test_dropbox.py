@@ -7,20 +7,21 @@ import sys
 import types
 import pytest
 from datetime import datetime, timezone
-from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# Inject a mock httpx module so the backend can be patched even when
-# the real httpx library is not installed.
+# Inject stub modules so broken optional deps do not crash collection.
+# - httpx: not installed; we need it as a patchable name on dropbox_backend.
+# - asyncssh / cryptography: installed but broken native extension in this env.
 # ---------------------------------------------------------------------------
 
-if "httpx" not in sys.modules:
-    _mock_httpx = types.ModuleType("httpx")
-    _mock_httpx.AsyncClient = MagicMock
-    sys.modules["httpx"] = _mock_httpx
+for _mod_name in ("httpx", "asyncssh", "cryptography", "cryptography.exceptions",
+                  "cryptography.hazmat", "cryptography.hazmat.bindings",
+                  "cryptography.hazmat.bindings._rust"):
+    if _mod_name not in sys.modules:
+        sys.modules[_mod_name] = types.ModuleType(_mod_name)
 
-from backend.storage.dropbox_backend import (  # noqa: E402  (after sys.modules injection)
+from backend.storage.dropbox_backend import (  # noqa: E402
     DropboxConfig,
     DropboxFileSystem,
     get_authorization_url,
@@ -76,10 +77,10 @@ def _make_folder_entry(
 
 def _make_async_client_ctx(post_return=None, stream_return=None):
     """
-    Build a mock httpx.AsyncClient context manager.
+    Build a mock httpx.AsyncClient async context manager.
 
-    Returns (mock_httpx_module, mock_client) so callers can assert on
-    mock_client.post / mock_client.stream calls.
+    Returns ``(mock_httpx_module, mock_client)`` so callers can assert on
+    ``mock_client.post`` / ``mock_client.stream`` calls.
     """
     mock_client = MagicMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -390,7 +391,6 @@ class TestDropboxFileSystem:
 
     async def test_write_sends_overwrite_mode(self, fs):
         mock_upload_resp = _make_mock_response(200, {"name": "file.bin"})
-
         captured_headers = {}
 
         async def capture_post(url, *, headers=None, content=None, **kwargs):
