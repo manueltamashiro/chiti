@@ -32,8 +32,8 @@ def _make_detector(
 
     detector = OfflineDetector(check_interval_seconds=check_interval, ollama=mock_ollama)
 
-    # Patch the sync Anthropic check
-    detector._check_anthropic_sync = MagicMock(return_value=anthropic_reachable)
+    # Patch the async Anthropic check so we control what it returns
+    detector._check_anthropic = AsyncMock(return_value=anthropic_reachable)
 
     return detector
 
@@ -100,7 +100,7 @@ class TestCheck:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Anthropic reachability
+# Tests: Anthropic reachability via _check_anthropic_sync
 # ---------------------------------------------------------------------------
 
 class TestAnthropicCheck:
@@ -111,14 +111,19 @@ class TestAnthropicCheck:
         assert status.can_reach_anthropic is True
 
     def test_anthropic_401_returns_true(self):
-        """HTTP 4xx (e.g., 401 Unauthorized) still means connection works."""
-        # Simulate urllib HTTPError (4xx)
+        """HTTP 4xx (e.g., 401 Unauthorized) still means connection works.
+
+        _check_anthropic_sync catches urllib.error.HTTPError and returns True,
+        because reaching the server (even with auth failure) proves connectivity.
+        """
         mock_ollama = MagicMock()
         mock_ollama.is_available = AsyncMock(return_value=False)
 
         detector = OfflineDetector(check_interval_seconds=60.0, ollama=mock_ollama)
 
-        def raise_http_error():
+        # Patch _check_anthropic_sync to raise HTTPError — the method should catch it
+        # and return True (connection reached the server)
+        def sync_raises_http_error():
             raise urllib.error.HTTPError(
                 url="https://api.anthropic.com",
                 code=401,
@@ -127,16 +132,47 @@ class TestAnthropicCheck:
                 fp=None,
             )
 
-        detector._check_anthropic_sync = raise_http_error
-        status = run(detector.check())
-        # HTTPError means connection reached the server — should be True
-        assert status.can_reach_anthropic is True
+        # We need to verify the _check_anthropic_sync method properly handles HTTPError.
+        # Since the default implementation does handle it, we test via the actual
+        # sync method logic with a patched urlopen.
+        import urllib.request
+
+        def mock_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="https://api.anthropic.com",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,
+                fp=None,
+            )
+
+        with patch.object(urllib.request, "urlopen", side_effect=mock_urlopen):
+            result = detector._check_anthropic_sync()
+
+        assert result is True
 
     def test_anthropic_connection_error_returns_false(self):
         """Connection error means can_reach_anthropic=False."""
         detector = _make_detector(anthropic_reachable=False, ollama_available=False)
         status = run(detector.check())
         assert status.can_reach_anthropic is False
+
+    def test_anthropic_sync_url_error_returns_false(self):
+        """urllib.error.URLError (no connection) causes _check_anthropic_sync to return False."""
+        mock_ollama = MagicMock()
+        mock_ollama.is_available = AsyncMock(return_value=False)
+
+        detector = OfflineDetector(check_interval_seconds=60.0, ollama=mock_ollama)
+
+        import urllib.request
+
+        def mock_urlopen(req, timeout=None):
+            raise urllib.error.URLError("Connection refused")
+
+        with patch.object(urllib.request, "urlopen", side_effect=mock_urlopen):
+            result = detector._check_anthropic_sync()
+
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +198,7 @@ class TestOllamaCheck:
         mock_ollama.is_available = AsyncMock(return_value=True)
 
         detector = OfflineDetector(check_interval_seconds=60.0, ollama=mock_ollama)
-        detector._check_anthropic_sync = MagicMock(return_value=False)
+        detector._check_anthropic = AsyncMock(return_value=False)
 
         run(detector.check())
         mock_ollama.is_available.assert_called_once()
@@ -205,7 +241,7 @@ class TestCaching:
         mock_ollama.is_available = AsyncMock(return_value=True)
 
         detector = OfflineDetector(check_interval_seconds=60.0, ollama=mock_ollama)
-        detector._check_anthropic_sync = MagicMock(return_value=True)
+        detector._check_anthropic = AsyncMock(return_value=True)
 
         first = run(detector.get_status())
         second = run(detector.get_status())
@@ -220,7 +256,7 @@ class TestCaching:
         mock_ollama.is_available = AsyncMock(return_value=True)
 
         detector = OfflineDetector(check_interval_seconds=0.01, ollama=mock_ollama)
-        detector._check_anthropic_sync = MagicMock(return_value=True)
+        detector._check_anthropic = AsyncMock(return_value=True)
 
         run(detector.get_status())
 
@@ -266,7 +302,7 @@ class TestWaitForOnline:
         mock_ollama.is_available = flaky_available
 
         detector = OfflineDetector(check_interval_seconds=0.0, ollama=mock_ollama)
-        detector._check_anthropic_sync = MagicMock(return_value=False)
+        detector._check_anthropic = AsyncMock(return_value=False)
 
         result = run(detector.wait_for_online(timeout=10.0))
         assert result is True
