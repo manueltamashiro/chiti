@@ -7,11 +7,12 @@ instance and reconnected automatically on disconnect.
 Registered as the 'sftp://' backend when create_sftp_backend(config) is called.
 """
 
-# Optional import
+# Optional import — catch any exception because some broken installations
+# raise non-ImportError exceptions (e.g. native-library crashes) at import time.
 try:
     import asyncssh
     HAS_ASYNCSSH = True
-except ImportError:
+except Exception:  # noqa: BLE001
     HAS_ASYNCSSH = False
     asyncssh = None  # type: ignore[assignment]
 
@@ -93,7 +94,7 @@ class SFTPFileSystem(FileSystem):
         rel = path.lstrip("/")
         if rel:
             return f"{base}/{rel}"
-        # base may be empty string if base_path was "/" — return "/"
+        # rel is empty — return base, defaulting to "/" if base was "/"
         return base if base else "/"
 
     def _parse_attrs(self, path: str, name: str, attrs) -> FileInfo:
@@ -137,7 +138,7 @@ class SFTPFileSystem(FileSystem):
         try:
             attrs = await self._sftp.stat(full)
         except Exception as exc:
-            # Catch asyncssh.SFTPError (referenced via module to avoid hard import)
+            # Catch asyncssh.SFTPError by class name to avoid a hard import
             if type(exc).__name__ == "SFTPError":
                 raise FileNotFoundError(f"Not found: {path}") from exc
             raise
