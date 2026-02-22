@@ -3,37 +3,35 @@ Tests for DropboxFileSystem backend
 """
 
 import json
+import sys
+import types
 import pytest
 from datetime import datetime, timezone
 from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.storage.dropbox_backend import (
+# ---------------------------------------------------------------------------
+# Inject a mock httpx module so the backend can be patched even when
+# the real httpx library is not installed.
+# ---------------------------------------------------------------------------
+
+if "httpx" not in sys.modules:
+    _mock_httpx = types.ModuleType("httpx")
+    _mock_httpx.AsyncClient = MagicMock
+    sys.modules["httpx"] = _mock_httpx
+
+from backend.storage.dropbox_backend import (  # noqa: E402  (after sys.modules injection)
     DropboxConfig,
     DropboxFileSystem,
     get_authorization_url,
     DROPBOX_AUTH_URL,
 )
-from backend.storage.abstract import FileInfo
+from backend.storage.abstract import FileInfo  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def config():
-    return DropboxConfig(
-        app_key="test_app_key",
-        app_secret="test_app_secret",
-        redirect_uri="http://localhost:8080/callback",
-    )
-
-
-@pytest.fixture
-def fs():
-    return DropboxFileSystem()
 
 
 def _make_mock_response(status_code: int, json_data: dict) -> MagicMock:
@@ -42,11 +40,10 @@ def _make_mock_response(status_code: int, json_data: dict) -> MagicMock:
     mock_resp.status_code = status_code
     mock_resp.json.return_value = json_data
     mock_resp.text = json.dumps(json_data)
-    mock_resp.raise_for_status = MagicMock()
     if status_code >= 400:
-        mock_resp.raise_for_status.side_effect = Exception(
-            f"HTTP {status_code}"
-        )
+        mock_resp.raise_for_status.side_effect = Exception(f"HTTP {status_code}")
+    else:
+        mock_resp.raise_for_status = MagicMock()
     return mock_resp
 
 
@@ -75,6 +72,45 @@ def _make_folder_entry(
         "name": name,
         "path_display": path_display,
     }
+
+
+def _make_async_client_ctx(post_return=None, stream_return=None):
+    """
+    Build a mock httpx.AsyncClient context manager.
+
+    Returns (mock_httpx_module, mock_client) so callers can assert on
+    mock_client.post / mock_client.stream calls.
+    """
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    if post_return is not None:
+        mock_client.post = AsyncMock(return_value=post_return)
+    if stream_return is not None:
+        mock_client.stream = MagicMock(return_value=stream_return)
+
+    mock_httpx = MagicMock()
+    mock_httpx.AsyncClient.return_value = mock_client
+    return mock_httpx, mock_client
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def config():
+    return DropboxConfig(
+        app_key="test_app_key",
+        app_secret="test_app_secret",
+        redirect_uri="http://localhost:8080/callback",
+    )
+
+
+@pytest.fixture
+def fs():
+    return DropboxFileSystem()
 
 
 # ---------------------------------------------------------------------------
@@ -136,25 +172,19 @@ class TestDropboxFileSystem:
 
     async def test_list_parses_response(self, fs):
         list_response = {
-            "entries": [
-                _make_file_entry("readme.txt", "/readme.txt", 512),
-            ],
+            "entries": [_make_file_entry("readme.txt", "/readme.txt", 512)],
             "cursor": "cursor123",
             "has_more": False,
         }
-
-        mock_response = _make_mock_response(200, list_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(200, list_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             entries = await fs.list("")
 
         assert len(entries) == 1
@@ -170,19 +200,15 @@ class TestDropboxFileSystem:
             "cursor": "cursor456",
             "has_more": False,
         }
-
-        mock_response = _make_mock_response(200, list_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(200, list_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             entries = await fs.list("")
 
         dirs = [e for e in entries if e.is_dir]
@@ -203,19 +229,15 @@ class TestDropboxFileSystem:
             "cursor": "cur",
             "has_more": False,
         }
-
-        mock_response = _make_mock_response(200, list_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(200, list_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             entries = await fs.list("")
 
         dir_entries = [e for e in entries if e.is_dir]
@@ -226,30 +248,25 @@ class TestDropboxFileSystem:
             assert last_dir_idx < first_file_idx
 
     async def test_list_paginates(self, fs):
-        first_response = {
+        first_response = _make_mock_response(200, {
             "entries": [_make_file_entry("a.txt", "/a.txt")],
             "cursor": "cursor_page1",
             "has_more": True,
-        }
-        second_response = {
+        })
+        second_response = _make_mock_response(200, {
             "entries": [_make_file_entry("b.txt", "/b.txt")],
             "cursor": "cursor_page2",
             "has_more": False,
-        }
+        })
 
-        first_mock = _make_mock_response(200, first_response)
-        second_mock = _make_mock_response(200, second_response)
+        mock_httpx, mock_client = _make_async_client_ctx()
+        mock_client.post = AsyncMock(side_effect=[first_response, second_response])
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(side_effect=[first_mock, second_mock])
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             entries = await fs.list("")
 
         assert len(entries) == 2
@@ -265,19 +282,15 @@ class TestDropboxFileSystem:
         metadata_response = _make_file_entry(
             "report.pdf", "/Documents/report.pdf", 2048
         )
-
-        mock_response = _make_mock_response(200, metadata_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(200, metadata_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             info = await fs.stat("/Documents/report.pdf")
 
         assert isinstance(info, FileInfo)
@@ -288,19 +301,15 @@ class TestDropboxFileSystem:
 
     async def test_stat_folder_returns_is_dir(self, fs):
         metadata_response = _make_folder_entry("Documents", "/Documents")
-
-        mock_response = _make_mock_response(200, metadata_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(200, metadata_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             info = await fs.stat("/Documents")
 
         assert info.is_dir
@@ -311,18 +320,15 @@ class TestDropboxFileSystem:
             "error_summary": "path/not_found/...",
             "error": {".tag": "path", "path": {".tag": "not_found"}},
         }
-        mock_response = _make_mock_response(409, error_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(409, error_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             with pytest.raises(FileNotFoundError):
                 await fs.stat("/nonexistent/file.txt")
 
@@ -343,16 +349,13 @@ class TestDropboxFileSystem:
         mock_stream_resp.__aenter__ = AsyncMock(return_value=mock_stream_resp)
         mock_stream_resp.__aexit__ = AsyncMock(return_value=False)
 
+        mock_httpx, mock_client = _make_async_client_ctx(stream_return=mock_stream_resp)
+
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.stream.return_value = mock_stream_resp
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             collected = []
             async for chunk in fs.read("/Documents/report.pdf"):
                 collected.append(chunk)
@@ -370,21 +373,18 @@ class TestDropboxFileSystem:
             "path_display": "/out.txt",
             "id": "id:abc123",
         })
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=mock_upload_resp
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_upload_resp)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             async with fs.write("/out.txt") as buf:
                 buf.write(b"test content")
 
-        # Verify post was called with the upload endpoint
         call_args = mock_client.post.call_args
         assert "files/upload" in call_args[0][0]
 
@@ -397,16 +397,14 @@ class TestDropboxFileSystem:
             captured_headers.update(headers or {})
             return mock_upload_resp
 
+        mock_httpx, mock_client = _make_async_client_ctx()
+        mock_client.post = capture_post
+
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = capture_post
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             async with fs.write("/file.bin") as buf:
                 buf.write(b"data")
 
@@ -419,18 +417,15 @@ class TestDropboxFileSystem:
 
     async def test_exists_true_when_stat_succeeds(self, fs):
         metadata_response = _make_file_entry("hello.txt", "/hello.txt", 10)
-        mock_response = _make_mock_response(200, metadata_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(200, metadata_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             result = await fs.exists("/hello.txt")
 
         assert result is True
@@ -440,18 +435,15 @@ class TestDropboxFileSystem:
             "error_summary": "path/not_found/...",
             "error": {".tag": "path", "path": {".tag": "not_found"}},
         }
-        mock_response = _make_mock_response(409, error_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(409, error_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             result = await fs.exists("/no/such/file.txt")
 
         assert result is False
@@ -461,20 +453,16 @@ class TestDropboxFileSystem:
     # -----------------------------------------------------------------------
 
     async def test_delete_calls_correct_endpoint(self, fs):
-        mock_response = _make_mock_response(200, {
+        mock_resp = _make_mock_response(200, {
             "metadata": _make_file_entry("gone.txt", "/gone.txt"),
         })
+        mock_httpx, mock_client = _make_async_client_ctx(post_return=mock_resp)
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             await fs.delete("/gone.txt")
 
         call_args = mock_client.post.call_args
@@ -487,18 +475,15 @@ class TestDropboxFileSystem:
             "error_summary": "path_lookup/not_found/...",
             "error": {".tag": "path_lookup", "path_lookup": {".tag": "not_found"}},
         }
-        mock_response = _make_mock_response(409, error_response)
+        mock_httpx, mock_client = _make_async_client_ctx(
+            post_return=_make_mock_response(409, error_response)
+        )
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             with pytest.raises(FileNotFoundError):
                 await fs.delete("/nonexistent.txt")
 
@@ -507,20 +492,16 @@ class TestDropboxFileSystem:
     # -----------------------------------------------------------------------
 
     async def test_move_calls_correct_endpoint(self, fs):
-        mock_response = _make_mock_response(200, {
+        mock_resp = _make_mock_response(200, {
             "metadata": _make_file_entry("new.txt", "/dst/new.txt"),
         })
+        mock_httpx, mock_client = _make_async_client_ctx(post_return=mock_resp)
 
         with patch(
             "backend.storage.dropbox_backend.oauth_manager.get_token",
             new=AsyncMock(return_value="fake_token"),
-        ), patch("backend.storage.dropbox_backend.httpx") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_httpx.AsyncClient.return_value = mock_client
-
+        ), patch("backend.storage.dropbox_backend.httpx", mock_httpx), \
+           patch("backend.storage.dropbox_backend.HAS_HTTPX", True):
             await fs.move("/src/old.txt", "/dst/new.txt")
 
         call_args = mock_client.post.call_args

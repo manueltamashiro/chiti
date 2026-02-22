@@ -63,11 +63,11 @@ class SFTPFileSystem(FileSystem):
 
     async def _ensure_connected(self) -> None:
         """Connect or reconnect the SSH/SFTP session."""
-        if not HAS_ASYNCSSH:
-            raise ImportError("asyncssh required for SFTP backend: pip install asyncssh")
-
         if self._sftp is not None:
             return  # Already connected
+
+        if not HAS_ASYNCSSH:
+            raise ImportError("asyncssh required for SFTP backend: pip install asyncssh")
 
         # Build connect kwargs
         connect_kwargs = {
@@ -91,7 +91,10 @@ class SFTPFileSystem(FileSystem):
         """Combine base_path and relative path into a full remote path."""
         base = self._config.base_path.rstrip("/")
         rel = path.lstrip("/")
-        return f"{base}/{rel}" if rel else base
+        if rel:
+            return f"{base}/{rel}"
+        # base may be empty string if base_path was "/" — return "/"
+        return base if base else "/"
 
     def _parse_attrs(self, path: str, name: str, attrs) -> FileInfo:
         """Convert asyncssh SFTPAttrs to FileInfo."""
@@ -133,8 +136,11 @@ class SFTPFileSystem(FileSystem):
         full = self._full_path(path)
         try:
             attrs = await self._sftp.stat(full)
-        except asyncssh.SFTPError:
-            raise FileNotFoundError(f"Not found: {path}")
+        except Exception as exc:
+            # Catch asyncssh.SFTPError (referenced via module to avoid hard import)
+            if type(exc).__name__ == "SFTPError":
+                raise FileNotFoundError(f"Not found: {path}") from exc
+            raise
         name = Path(full).name
         return self._parse_attrs(path, name, attrs)
 
@@ -166,11 +172,16 @@ class SFTPFileSystem(FileSystem):
         full = self._full_path(path)
         try:
             await self._sftp.remove(full)
-        except asyncssh.SFTPError:
+        except Exception as exc:
+            if type(exc).__name__ != "SFTPError":
+                raise
+            # remove failed — try rmdir
             try:
                 await self._sftp.rmdir(full)
-            except asyncssh.SFTPError:
-                raise FileNotFoundError(f"Not found: {path}")
+            except Exception as exc2:
+                if type(exc2).__name__ == "SFTPError":
+                    raise FileNotFoundError(f"Not found: {path}") from exc2
+                raise
 
     async def move(self, src: str, dst: str) -> None:
         async with self._get_lock():
