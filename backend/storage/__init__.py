@@ -29,7 +29,7 @@ except ImportError:
 try:
     from .sftp import SFTPFileSystem, SFTPConfig, create_sftp_backend
     _sftp_available = True
-except ImportError:
+except Exception:
     _sftp_available = False
 
 __all__ = [
