@@ -2,17 +2,46 @@
 Tests for SFTPFileSystem backend.
 
 asyncssh is mocked at the module level throughout TestSFTPFileSystem because
-the native asyncssh package may not be importable in all environments. The
-autouse fixture in TestSFTPFileSystem patches HAS_ASYNCSSH=True, injects a
-stub asyncssh module, and pre-connects the SFTPFileSystem instance so every
-test starts with a working (mocked) SFTP session.
+the real asyncssh package may be unavailable or unimportable in this
+environment. A stub module is injected into sys.modules *before* sftp.py is
+imported so that ``HAS_ASYNCSSH = True`` and all asyncssh references resolve
+to our stub. The autouse fixture in TestSFTPFileSystem additionally
+pre-connects the SFTPFileSystem instance (sets ``_sftp`` / ``_conn``) so
+every test starts with a working (mocked) SFTP session.
 """
 
-import stat as stat_module
+# ---------------------------------------------------------------------------
+# Inject asyncssh stub BEFORE any backend import so sftp.py sees it.
+# ---------------------------------------------------------------------------
 import sys
 import types
+
+def _make_sftp_error_class():
+    """Build a minimal SFTPError exception class compatible with sftp.py checks."""
+    class SFTPError(Exception):
+        def __init__(self, code, reason=""):
+            self.code = code
+            self.reason = reason
+            super().__init__(reason)
+    return SFTPError
+
+def _build_asyncssh_stub():
+    stub = types.ModuleType("asyncssh")
+    stub.SFTPError = _make_sftp_error_class()
+    stub.FX_NO_SUCH_FILE = 2  # SFTP status code for "no such file"
+    stub.connect = None  # replaced per-test when needed
+    return stub
+
+# Replace (or pre-register) asyncssh with our stub so the broken real package
+# is never loaded.
+_ASYNCSSH_STUB = _build_asyncssh_stub()
+sys.modules["asyncssh"] = _ASYNCSSH_STUB
+
+# ---------------------------------------------------------------------------
+# Now safe to import backend modules.
+# ---------------------------------------------------------------------------
+import stat as stat_module
 from datetime import datetime
-from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,28 +64,6 @@ def make_attrs(size=100, mtime=None, is_dir=False):
     else:
         attrs.permissions = stat_module.S_IFREG | 0o644
     return attrs
-
-
-def _make_sftp_error_class():
-    """Build a minimal SFTPError exception class for mocking."""
-    class SFTPError(Exception):
-        def __init__(self, code, reason=""):
-            self.code = code
-            self.reason = reason
-            super().__init__(reason)
-    return SFTPError
-
-
-def _make_asyncssh_stub():
-    """
-    Return a stub module that provides the subset of asyncssh used by sftp.py
-    and the tests (SFTPError, FX_NO_SUCH_FILE, connect).
-    """
-    stub = types.ModuleType("asyncssh")
-    stub.SFTPError = _make_sftp_error_class()
-    stub.FX_NO_SUCH_FILE = 2  # SFTP status code for "no such file"
-    stub.connect = AsyncMock()
-    return stub
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +117,11 @@ class TestSFTPFileSystem:
     @pytest.fixture(autouse=True)
     def mock_asyncssh(self, fs):
         """
-        Patch asyncssh at the backend module level with a stub, set
-        HAS_ASYNCSSH=True, and pre-connect the fs instance so _ensure_connected
-        is a no-op (self._sftp is not None).
+        Ensure HAS_ASYNCSSH=True in sftp.py and pre-connect the fs instance
+        (sets _sftp / _conn to mocks) so _ensure_connected() is a no-op.
         """
-        self._asyncssh_stub = _make_asyncssh_stub()
-
         mock_sftp = AsyncMock()
-        # exit() is a regular synchronous call in asyncssh's SFTPClient
+        # exit() is synchronous in asyncssh's SFTPClient
         mock_sftp.exit = MagicMock()
         mock_conn = MagicMock()
 
@@ -126,8 +130,7 @@ class TestSFTPFileSystem:
         self.mock_sftp = mock_sftp
         self.mock_conn = mock_conn
 
-        with patch("backend.storage.sftp.HAS_ASYNCSSH", True), \
-             patch("backend.storage.sftp.asyncssh", self._asyncssh_stub):
+        with patch("backend.storage.sftp.HAS_ASYNCSSH", True):
             yield
 
     # ------------------------------------------------------------------
@@ -229,8 +232,8 @@ class TestSFTPFileSystem:
         assert info.size == 500
 
     async def test_stat_not_found(self, fs):
-        self.mock_sftp.stat.side_effect = self._asyncssh_stub.SFTPError(
-            self._asyncssh_stub.FX_NO_SUCH_FILE, "not found"
+        self.mock_sftp.stat.side_effect = _ASYNCSSH_STUB.SFTPError(
+            _ASYNCSSH_STUB.FX_NO_SUCH_FILE, "not found"
         )
         with pytest.raises(FileNotFoundError):
             await fs.stat("/ghost.txt")
@@ -254,8 +257,8 @@ class TestSFTPFileSystem:
         assert await fs.exists("/file.txt") is True
 
     async def test_exists_false(self, fs):
-        self.mock_sftp.stat.side_effect = self._asyncssh_stub.SFTPError(
-            self._asyncssh_stub.FX_NO_SUCH_FILE, "not found"
+        self.mock_sftp.stat.side_effect = _ASYNCSSH_STUB.SFTPError(
+            _ASYNCSSH_STUB.FX_NO_SUCH_FILE, "not found"
         )
         assert await fs.exists("/ghost.txt") is False
 
@@ -268,7 +271,7 @@ class TestSFTPFileSystem:
         mock_file.__aenter__ = AsyncMock(return_value=mock_file)
         mock_file.__aexit__ = AsyncMock(return_value=False)
         mock_file.read.side_effect = [b"data", b""]
-        self.mock_sftp.open.return_value = mock_file
+        self.mock_sftp.open = MagicMock(return_value=mock_file)
 
         chunks = []
         async for chunk in fs.read("/file.txt"):
@@ -280,7 +283,7 @@ class TestSFTPFileSystem:
         mock_file.__aenter__ = AsyncMock(return_value=mock_file)
         mock_file.__aexit__ = AsyncMock(return_value=False)
         mock_file.read.side_effect = [b"chunk1", b"chunk2", b""]
-        self.mock_sftp.open.return_value = mock_file
+        self.mock_sftp.open = MagicMock(return_value=mock_file)
 
         chunks = []
         async for chunk in fs.read("/file.txt"):
@@ -292,14 +295,14 @@ class TestSFTPFileSystem:
         mock_file.__aenter__ = AsyncMock(return_value=mock_file)
         mock_file.__aexit__ = AsyncMock(return_value=False)
         mock_file.read.side_effect = [b""]
-        self.mock_sftp.open.return_value = mock_file
+        self.mock_sftp.open = MagicMock(return_value=mock_file)
 
         async for _ in fs.read("/file.txt"):
             pass
         self.mock_sftp.open.assert_called_once()
-        # Verify "rb" appears in positional args
-        call_args = self.mock_sftp.open.call_args
-        assert "rb" in call_args[0]
+        # Verify "rb" appears in the positional call args
+        call_args = self.mock_sftp.open.call_args[0]
+        assert "rb" in call_args
 
     # ------------------------------------------------------------------
     # delete
@@ -311,19 +314,19 @@ class TestSFTPFileSystem:
         self.mock_sftp.remove.assert_called_once()
 
     async def test_delete_falls_back_to_rmdir(self, fs):
-        self.mock_sftp.remove.side_effect = self._asyncssh_stub.SFTPError(
-            self._asyncssh_stub.FX_NO_SUCH_FILE, "not a file"
+        self.mock_sftp.remove.side_effect = _ASYNCSSH_STUB.SFTPError(
+            _ASYNCSSH_STUB.FX_NO_SUCH_FILE, "not a file"
         )
         self.mock_sftp.rmdir.return_value = None
         await fs.delete("/mydir")
         self.mock_sftp.rmdir.assert_called_once()
 
     async def test_delete_raises_file_not_found_when_both_fail(self, fs):
-        self.mock_sftp.remove.side_effect = self._asyncssh_stub.SFTPError(
-            self._asyncssh_stub.FX_NO_SUCH_FILE, "not found"
+        self.mock_sftp.remove.side_effect = _ASYNCSSH_STUB.SFTPError(
+            _ASYNCSSH_STUB.FX_NO_SUCH_FILE, "not found"
         )
-        self.mock_sftp.rmdir.side_effect = self._asyncssh_stub.SFTPError(
-            self._asyncssh_stub.FX_NO_SUCH_FILE, "not found"
+        self.mock_sftp.rmdir.side_effect = _ASYNCSSH_STUB.SFTPError(
+            _ASYNCSSH_STUB.FX_NO_SUCH_FILE, "not found"
         )
         with pytest.raises(FileNotFoundError):
             await fs.delete("/ghost")
@@ -364,7 +367,7 @@ class TestSFTPFileSystem:
 
     def test_get_lock_creates_lock(self, fs):
         import asyncio
-        # _lock starts as None (before first call)
+        # Reset to None so we test lazy creation
         fs._lock = None
         lock = fs._get_lock()
         assert isinstance(lock, asyncio.Lock)
