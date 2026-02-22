@@ -43,6 +43,11 @@ filesystem = [
     "aiofiles>=23.2.1",
     "watchdog>=3.0.0",
 ]
+cloud = [
+    "httpx>=0.25.0",
+    "boto3>=1.34.0",
+    "asyncssh>=2.14.0",
+]
 all = [
-    "chiti[dev,oauth,database,skills,filesystem]",
+    "chiti[dev,oauth,database,skills,filesystem,cloud]",
 ]
