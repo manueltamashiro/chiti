@@ -12,7 +12,7 @@ Registered as the 'sftp://' backend when create_sftp_backend(config) is called.
 try:
     import asyncssh
     HAS_ASYNCSSH = True
-except Exception:  # noqa: BLE001
+except BaseException:  # noqa: BLE001
     HAS_ASYNCSSH = False
     asyncssh = None  # type: ignore[assignment]
 

@@ -266,7 +266,7 @@ class TestCloudUploadTool:
             mock_ctx = AsyncMock()
             mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
             mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_router.write.return_value = mock_ctx
+            mock_router.write = AsyncMock(return_value=mock_ctx)
             result = await self.tool.execute({"local_path": str(src), "cloud_uri": "gdrive://dst.txt"})
         assert result.content["level"] == "success"
 
@@ -282,7 +282,7 @@ class TestCloudUploadTool:
             mock_ctx = AsyncMock()
             mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
             mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_router.write.return_value = mock_ctx
+            mock_router.write = AsyncMock(return_value=mock_ctx)
             result = await self.tool.execute({"local_path": str(src), "cloud_uri": "s3://bucket/upload.bin"})
         assert str(src) in result.content["message"]
         assert "s3://bucket/upload.bin" in result.content["message"]

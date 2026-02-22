@@ -331,4 +331,4 @@ class TestRouterRegistration:
 
     def test_router_unknown_scheme_raises(self):
         with pytest.raises(ValueError, match="No backend"):
-            filesystem_router.resolve("gdrive://My Drive/file.txt")
+            filesystem_router.resolve("neverregistered://some/path")
