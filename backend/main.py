@@ -76,18 +76,39 @@ _approval_results: Dict[str, bool] = {}  # True = approved, False = denied
 async def lifespan(app: FastAPI):
     logger.info("Starting assistant-api", extra={"host": "127.0.0.1", "port": 8000})
     await init_db()
+
+    # Phase 2: memory & audit DBs
+    try:
+        from backend.memory.structured import init_structured_db
+        from backend.memory.audit import init_audit_db
+        from backend.scheduler.queue import init_queue_db
+        from backend.scheduler.jobs import init_jobs_db
+        from backend.proactive.notifications import init_notifications_db
+        from backend.proactive.push import init_push_db
+        await init_structured_db()
+        await init_audit_db()
+        await init_queue_db()
+        await init_jobs_db()
+        await init_notifications_db()
+        await init_push_db()
+    except Exception as exc:
+        logger.warning("Phase 2/3 DB init error (non-fatal)", extra={"error": str(exc)})
+
     _register_tools()
     yield
     logger.info("Shutting down assistant-api")
 
 
 def _register_tools() -> None:
-    """Register all Tier 1 tools into the CapabilityRegistry at startup."""
+    """Register all tools into the CapabilityRegistry at startup."""
     from backend.tools.filesystem import ReadFileTool, ListDirectoryTool, FindFilesTool, DiskUsageTool
     from backend.tools.system import SystemStatsTool
     from backend.tools.network import CheckUrlTool, PingTool
+    from backend.tools.memory_tools import MemorySearchTool, MemoryWriteTool, MemoryDeleteTool
+    from backend.tools.job_tools import JobListTool, JobCreateTool, JobUpdateTool, JobDeleteTool
 
-    for tool in [
+    tools = [
+        # Tier 1 — read-only
         ReadFileTool(),
         ListDirectoryTool(),
         FindFilesTool(),
@@ -95,7 +116,18 @@ def _register_tools() -> None:
         SystemStatsTool(),
         CheckUrlTool(),
         PingTool(),
-    ]:
+        MemorySearchTool(),
+        JobListTool(),
+        # Tier 2 — reversible write
+        MemoryWriteTool(),
+        JobCreateTool(),
+        JobUpdateTool(),
+        # Tier 3 — destructive
+        MemoryDeleteTool(),
+        JobDeleteTool(),
+    ]
+
+    for tool in tools:
         try:
             capability_registry.register_tool(tool)
         except Exception as exc:
@@ -226,6 +258,14 @@ async def chat(request: ChatRequest):
     # Load conversation history for context
     history = await get_recent_messages_for_llm(conv_id, limit=20)
 
+    # Inject memory context into system prompt (Phase 2)
+    memory_context = ""
+    try:
+        from backend.memory.injector import build_context
+        memory_context = await build_context(request.message)
+    except Exception as exc:
+        logger.debug("Memory context unavailable", extra={"error": str(exc)})
+
     # Get registered tools for the LLM
     llm_tools = capability_registry.get_all_for_llm()
 
@@ -239,7 +279,11 @@ async def chat(request: ChatRequest):
         assistant_blocks: List[Dict[str, Any]] = []
         assistant_text_parts: List[str] = []
 
-        async for block in client.stream_response(history, tools=llm_tools if llm_tools else None):
+        async for block in client.stream_response(
+            history,
+            system_context=memory_context or None,
+            tools=llm_tools if llm_tools else None,
+        ):
             if block.type == "tool_call":
                 # Classify the tool call
                 tool_name = block.content.get("name", "")
@@ -365,3 +409,164 @@ async def history_detail(
         raise HTTPException(status_code=404, detail="Conversation not found")
     msgs = await get_messages(conversation_id, limit=limit, offset=offset)
     return {"conversation": conv, "messages": msgs}
+
+
+# ---------------------------------------------------------------------------
+# Memory endpoints (Phase 2)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/memory/facts")
+async def memory_facts(limit: int = Query(100, ge=1, le=500)):
+    from backend.memory.structured import list_facts
+    return {"facts": await list_facts(limit=limit)}
+
+
+@app.get("/api/memory/preferences")
+async def memory_preferences():
+    from backend.memory.structured import list_preferences
+    return {"preferences": await list_preferences()}
+
+
+@app.get("/api/memory/people")
+async def memory_people():
+    from backend.memory.structured import list_people
+    return {"people": await list_people()}
+
+
+@app.get("/api/memory/episodic")
+async def memory_episodic(limit: int = Query(50, ge=1, le=200)):
+    from backend.memory.episodic import list_summaries
+    return {"summaries": await list_summaries(limit=limit)}
+
+
+@app.delete("/api/memory/{mem_type}/{mem_id}")
+async def memory_delete(mem_type: str, mem_id: str):
+    from backend.memory import structured, episodic
+    if mem_type == "fact":
+        await structured.delete_fact(mem_id)
+    elif mem_type == "preference":
+        await structured.delete_preference(mem_id)
+    elif mem_type == "person":
+        await structured.delete_person(mem_id)
+    elif mem_type == "event":
+        await structured.delete_event(mem_id)
+    elif mem_type == "episodic":
+        await episodic.delete_summary(mem_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown memory type: {mem_type}")
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Notification endpoints (Phase 3)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/notifications")
+async def notifications_list(
+    limit: int = Query(50, ge=1, le=200),
+    include_dismissed: bool = Query(False),
+):
+    from backend.proactive.notifications import list_notifications, get_unread_count
+    items = await list_notifications(limit=limit, include_dismissed=include_dismissed)
+    unread = await get_unread_count()
+    return {"notifications": items, "unread_count": unread}
+
+
+@app.post("/api/notifications/{notification_id}/dismiss")
+async def notification_dismiss(notification_id: str):
+    from backend.proactive.notifications import dismiss
+    await dismiss(notification_id)
+    return {"status": "dismissed"}
+
+
+@app.post("/api/notifications/{notification_id}/snooze")
+async def notification_snooze(notification_id: str, until: str):
+    from backend.proactive.notifications import snooze
+    await snooze(notification_id, until)
+    return {"status": "snoozed", "until": until}
+
+
+# ---------------------------------------------------------------------------
+# Push subscription endpoints (Phase 3)
+# ---------------------------------------------------------------------------
+
+class PushSubscriptionRequest(BaseModel):
+    endpoint: str
+    auth: str
+    p256dh: str
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(req: PushSubscriptionRequest):
+    from backend.proactive.push import save_subscription
+    sid = await save_subscription(req.endpoint, req.auth, req.p256dh)
+    return {"status": "subscribed", "id": sid}
+
+
+@app.delete("/api/push/subscribe")
+async def push_unsubscribe(endpoint: str):
+    from backend.proactive.push import delete_subscription
+    await delete_subscription(endpoint)
+    return {"status": "unsubscribed"}
+
+
+# ---------------------------------------------------------------------------
+# Scheduled jobs endpoints (Phase 3)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/jobs")
+async def jobs_list():
+    from backend.scheduler.jobs import list_jobs
+    return {"jobs": await list_jobs()}
+
+
+@app.get("/api/jobs/queue")
+async def job_queue_list(limit: int = Query(50, ge=1, le=200)):
+    from backend.scheduler.queue import list_jobs as list_queue_jobs
+    return {"jobs": await list_queue_jobs(limit=limit)}
+
+
+# ---------------------------------------------------------------------------
+# Audit log endpoints (Phase 4)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/audit")
+async def audit_list(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    tool_name: Optional[str] = Query(None),
+    tier: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+):
+    from backend.memory.audit import list_audit_logs
+    logs = await list_audit_logs(
+        limit=limit, offset=offset, tool_name=tool_name,
+        tier=tier, date_from=date_from, date_to=date_to,
+    )
+    return {"logs": logs, "limit": limit, "offset": offset}
+
+
+@app.get("/api/audit/{entry_id}")
+async def audit_detail(entry_id: str):
+    from backend.memory.audit import get_audit_entry
+    entry = await get_audit_entry(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Audit entry not found")
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# Summarize conversation endpoint (Phase 2)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/history/{conversation_id}/summarize")
+async def summarize_conversation_endpoint(conversation_id: str):
+    """Trigger summarization of a completed conversation."""
+    conv = await get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msgs = await get_recent_messages_for_llm(conversation_id, limit=50)
+    from backend.memory.summarizer import summarize_conversation
+    summary = await summarize_conversation(conversation_id, msgs)
+    return {"conversation_id": conversation_id, "summary": summary}

@@ -1,0 +1,19 @@
+[Unit]
+Description=Chiti Assistant — Next.js frontend (port 3000)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/chiti/frontend
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

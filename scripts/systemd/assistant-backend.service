@@ -1,0 +1,21 @@
+[Unit]
+Description=Chiti Assistant — FastAPI backend (port 8000)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/chiti
+ExecStart=/usr/bin/python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/%i/chiti/data
+
+[Install]
+WantedBy=multi-user.target
