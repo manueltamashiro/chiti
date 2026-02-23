@@ -27,6 +27,9 @@ try:
     HAS_WATCHDOG = True
 except ImportError:
     HAS_WATCHDOG = False
+    # Provide a no-op base class so the _WatchdogHandler definition below
+    # succeeds even when watchdog is not installed.
+    FileSystemEventHandler = object  # type: ignore[assignment,misc]
     logger.warning(
         "watchdog not installed — filesystem observer will use polling. "
         "Install with: pip install watchdog"
@@ -189,11 +192,25 @@ class FilesystemObserver:
     """
 
     def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-        self._loop: asyncio.AbstractEventLoop = loop or asyncio.get_event_loop()
+        # Store the explicitly provided loop; if None, resolve lazily at start()
+        # time so that module-level instantiation works even before an asyncio
+        # event loop exists (e.g. during import in sync test contexts).
+        self._loop: Optional[asyncio.AbstractEventLoop] = loop
         self._watched_paths: List[str] = []
         self._callbacks: List[EventCallback] = []
         self._running = False
         self._backend: Optional[object] = None
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the event loop, resolving it lazily if not provided at init."""
+        if self._loop is not None:
+            return self._loop
+        try:
+            self._loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+        return self._loop
 
     def watch(self, path: str, callback: EventCallback) -> None:
         """
@@ -217,19 +234,21 @@ class FilesystemObserver:
             logger.warning("FilesystemObserver.start() called with no paths registered")
             return
 
+        loop = self._get_loop()
+
         def _combined_callback(event: FileChangeEvent) -> None:
             for cb in self._callbacks:
                 try:
                     if asyncio.iscoroutinefunction(cb):
-                        asyncio.run_coroutine_threadsafe(cb(event), self._loop)
+                        asyncio.run_coroutine_threadsafe(cb(event), loop)
                     else:
-                        self._loop.call_soon_threadsafe(cb, event)
+                        loop.call_soon_threadsafe(cb, event)
                 except Exception as e:
                     logger.error(f"Observer callback error: {e}")
 
         if HAS_WATCHDOG:
             observer = WatchdogObserver()
-            handler = _WatchdogHandler(_combined_callback, self._loop)
+            handler = _WatchdogHandler(_combined_callback, loop)
             for path in self._watched_paths:
                 observer.schedule(handler, path, recursive=True)
             observer.start()
@@ -238,7 +257,7 @@ class FilesystemObserver:
                 f"Filesystem observer started (watchdog) watching {len(self._watched_paths)} path(s)"
             )
         else:
-            poll = _PollingObserver(self._watched_paths, _combined_callback, self._loop)
+            poll = _PollingObserver(self._watched_paths, _combined_callback, loop)
             poll.start()
             self._backend = poll
             logger.info(

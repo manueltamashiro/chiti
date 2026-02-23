@@ -12,6 +12,11 @@ from backend.main import app
 
 @pytest.fixture
 async def client():
+    # Ensure all required DB tables exist before making API requests.
+    # The lifespan may not trigger via ASGITransport in all httpx versions,
+    # so we initialize explicitly here.
+    from backend.memory.conversation import init_db
+    await init_db()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as c:

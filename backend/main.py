@@ -95,34 +95,96 @@ async def lifespan(app: FastAPI):
         logger.warning("Phase 2/3 DB init error (non-fatal)", extra={"error": str(exc)})
 
     _register_tools()
+
+    # P4-11/P4-12: Start filesystem watcher and wire to WebSocket events
+    _start_filesystem_observer()
+
     yield
     logger.info("Shutting down assistant-api")
 
 
 def _register_tools() -> None:
-    """Register all tools into the CapabilityRegistry at startup."""
-    from backend.tools.filesystem import ReadFileTool, ListDirectoryTool, FindFilesTool, DiskUsageTool
-    from backend.tools.system import SystemStatsTool
-    from backend.tools.network import CheckUrlTool, PingTool
+    """Register all tools into the CapabilityRegistry at startup (P4-03/P4-04/P4-05)."""
+    # fmt: off
+    from backend.tools.filesystem import (
+        ReadFileTool, ListDirectoryTool, FindFilesTool, DiskUsageTool,
+        WriteFileTool, AppendFileTool, CreateDirectoryTool,
+        DeleteFileTool, MoveFileTool,
+    )
+    from backend.tools.system import (
+        SystemStatsTool, ListProcessesTool, GetProcessInfoTool,
+        CheckServiceTool, GetLogsTool, CheckPortTool,
+        StartServiceTool, StopServiceTool, KillProcessTool,
+    )
+    from backend.tools.network import (
+        PingTool, DnsLookupTool, CheckUrlTool, HttpGetTool,
+    )
+    from backend.tools.git import (
+        GitStatusTool, GitLogTool, GitDiffTool,
+        GitAddTool, GitCommitTool, GitCheckoutTool,
+        GitPushTool, GitCreateBranchTool,
+    )
+    from backend.tools.docker import (
+        DockerPsTool, DockerStatsTool, DockerLogsTool,
+        DockerRestartTool, DockerStartTool, DockerStopTool,
+    )
+    from backend.tools.process import RunPythonTool, RunNodeTool, TrustScriptTool
     from backend.tools.memory_tools import MemorySearchTool, MemoryWriteTool, MemoryDeleteTool
     from backend.tools.job_tools import JobListTool, JobCreateTool, JobUpdateTool, JobDeleteTool
+    from backend.tools.log_tail import LogTailTool
+    from backend.tools.uptime_monitor import UptimeCheckTool
+    # fmt: on
 
     tools = [
-        # Tier 1 — read-only
+        # ── Tier 1 — read-only (no confirmation) ──────────────────────────
         ReadFileTool(),
         ListDirectoryTool(),
         FindFilesTool(),
         DiskUsageTool(),
         SystemStatsTool(),
-        CheckUrlTool(),
+        ListProcessesTool(),
+        GetProcessInfoTool(),
+        CheckServiceTool(),
+        GetLogsTool(),
+        CheckPortTool(),
         PingTool(),
+        DnsLookupTool(),
+        CheckUrlTool(),
+        GitStatusTool(),
+        GitLogTool(),
+        GitDiffTool(),
+        DockerPsTool(),
+        DockerStatsTool(),
+        DockerLogsTool(),
+        LogTailTool(),
+        UptimeCheckTool(),
         MemorySearchTool(),
         JobListTool(),
-        # Tier 2 — reversible write
+        # ── Tier 2 — reversible write (soft confirmation) ─────────────────
+        WriteFileTool(),
+        AppendFileTool(),
+        CreateDirectoryTool(),
+        RunPythonTool(),
+        RunNodeTool(),
+        GitAddTool(),
+        GitCommitTool(),
+        GitCheckoutTool(),
+        DockerRestartTool(),
+        HttpGetTool(),
         MemoryWriteTool(),
         JobCreateTool(),
         JobUpdateTool(),
-        # Tier 3 — destructive
+        # ── Tier 3 — high-impact (explicit confirmation) ──────────────────
+        DeleteFileTool(),
+        MoveFileTool(),
+        GitPushTool(),
+        GitCreateBranchTool(),
+        DockerStartTool(),
+        DockerStopTool(),
+        StartServiceTool(),
+        StopServiceTool(),
+        KillProcessTool(),
+        TrustScriptTool(),
         MemoryDeleteTool(),
         JobDeleteTool(),
     ]
@@ -134,6 +196,48 @@ def _register_tools() -> None:
             logger.warning(f"Could not register tool {tool}: {exc}")
 
     logger.info("Tools registered", extra={"count": len(list(capability_registry.list_capabilities()))})
+
+
+def _start_filesystem_observer() -> None:
+    """
+    P4-11/P4-12: Start the filesystem watcher for directories listed in
+    ``config.yml → filesystem.watched_dirs``.
+
+    On each change, broadcasts a ``file.changed`` WebSocket event to all
+    connected clients.
+    """
+    watched = cfg.filesystem.watched_dirs
+    if not watched:
+        logger.debug("No watched_dirs configured — filesystem observer not started")
+        return
+
+    try:
+        from backend.proactive.observers import filesystem_observer, FileChangeEvent
+
+        async def _on_file_change(event: FileChangeEvent) -> None:
+            payload = {
+                "path": event.path,
+                "event_type": event.event_type,
+                "is_directory": event.is_directory,
+                "timestamp": event.timestamp.isoformat(),
+            }
+            if event.dest_path:
+                payload["dest_path"] = event.dest_path
+            await ws_hub.broadcast("file.changed", payload)
+
+        for directory in watched:
+            filesystem_observer.watch(directory, _on_file_change)
+
+        filesystem_observer.start()
+        logger.info(
+            "Filesystem observer started",
+            extra={"watched_dirs": watched},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Filesystem observer failed to start (non-fatal)",
+            extra={"error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
