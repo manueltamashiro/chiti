@@ -1,0 +1,78 @@
+llm:
+  primary: claude          # claude | ollama
+  model: claude-sonnet-4-6
+  local_model: llama3      # used when primary: ollama
+  max_tokens: 4096
+  temperature: 0.7
+
+memory:
+  episodic_enabled: true
+  consolidation_hour: 3    # 3am nightly
+  context_token_budget: 2000
+
+proactive:
+  heartbeat_interval_minutes: 5
+  reflection_enabled: true
+  reflection_hour: 23      # 11pm
+
+filesystem:
+  allowed_read:
+    - "local://~/Documents"
+    - "local://~/projects"
+    - "local://~/Downloads"
+  allowed_write:
+    - "local://~/Documents/assistant-output"
+    - "local://~/projects"
+  never_read:
+    - "**/.env"
+    - "**/*.pem"
+    - "**/*.key"
+    - "**/id_rsa*"
+    - "**/.aws"
+    - "**/.ssh"
+    - "**/*.pfx"
+    - "**/*.p12"
+    - "**/*.jks"
+  watched_dirs:
+    - "local://~/Downloads"
+
+terminal:
+  run_as_user: assistant
+  limits:
+    max_runtime_seconds: 60
+    max_output_bytes: 1048576    # 1 MB
+    max_concurrent_executions: 3
+  scripts:
+    always_show_before_run: true
+    trusted_scripts_dir: "~/assistant-scripts/trusted"
+
+network:
+  allowed_domains:
+    - "api.github.com"
+    - "registry.npmjs.org"
+    - "pypi.org"
+    - "api.anthropic.com"
+    - "api.openai.com"
+
+security:
+  ws_token_ttl_minutes: 15
+  ws_secret: "CHANGE_ME_BEFORE_PRODUCTION"
+  audit_log_retention_days: 90
+  pipeline_mode: balanced     # strict | balanced | permissive
+
+notifications:
+  push_enabled: false      # enable after VAPID setup
+  urgent_push: true
+  vapid_public_key: ""
+  vapid_private_key: ""
+  vapid_email: ""
+
+cloudflare:
+  tunnel_hostname: "assistant.yourdomain.com"
+
+database:
+  path: "./data/assistant.db"
+
+logging:
+  level: INFO              # DEBUG | INFO | WARNING | ERROR
+  format: json             # json | console
