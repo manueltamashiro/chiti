@@ -14,6 +14,8 @@ from .models import (
     ScrubResult,
     ClassificationResult,
 )
+from .action_classifier import ActionClassifier, ToolCall, action_classifier
+from .pipeline import ToolResultPipeline, PipelineConfig, PipelineMode, pipeline
 
 __all__ = [
     "ActionTier",
@@ -26,4 +28,11 @@ __all__ = [
     "FirewallResult",
     "ScrubResult",
     "ClassificationResult",
+    "ActionClassifier",
+    "ToolCall",
+    "action_classifier",
+    "ToolResultPipeline",
+    "PipelineConfig",
+    "PipelineMode",
+    "pipeline",
 ]
